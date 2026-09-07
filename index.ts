@@ -9,8 +9,8 @@
  *   ctx：来自 ctx.getContextUsage()；显示绝对量与百分比，>90% 红（error）、>70% 黄（warning），
  *        压缩后下次响应前未知时显示 "ctx ?/200k"
  *   cache：最近一次请求的缓存命中量与命中率（cacheRead/(input+cacheRead+cacheWrite)），provider 上报过缓存数据即常显，
- *          <50% 黄色警示（正常 muted）。百分比在激进缓存的 provider（如 zhipu 自动缓存）上会饱和到 100%，
- *          故主展示 token 量（每轮变化，可感知缓存规模）
+ *          <50% 黄色警示（正常 muted）。命中率一位小数（99.8%），激进缓存的 provider 上也贴近但不等于 100%，
+ *          主展示 token 量（每轮变化，可感知缓存规模）
  *
  * git 分支：后台异步逐层向上探测（git.ts），与 pi 内置 FooterDataProvider 互为回退：
  *   自身探测 → footerData.getGitBranch() → no git
@@ -283,11 +283,12 @@ export default function (pi: ExtensionAPI) {
 						}
 					}
 
-					// cache：缓存命中量（主展示，每轮变化）+ 命中率；provider 上报过缓存数据即常显，<50% 黄色警示
+					// cache：缓存命中量（主展示，每轮变化）+ 命中率（一位小数，避免 99.5~99.9% 被舍入成 100%）；
+					// provider 上报过缓存数据即常显，<50% 黄色警示
 					if (stats.cacheTokens > 0 && stats.latestCacheRead != null) {
-						const rate = stats.latestCacheHitRate != null ? Math.round(stats.latestCacheHitRate) : null;
+						const rate = stats.latestCacheHitRate != null ? stats.latestCacheHitRate.toFixed(1) : null;
 						const text = rate != null ? `cache ${fmtTokens(stats.latestCacheRead)} (${rate}%)` : `cache ${fmtTokens(stats.latestCacheRead)}`;
-						parts.push(theme.fg(rate != null && rate < 50 ? "warning" : "muted", text));
+						parts.push(theme.fg(rate != null && stats.latestCacheHitRate! < 50 ? "warning" : "muted", text));
 					}
 
 					lines.push(truncateToWidth(parts.join(theme.fg("dim", " │ ")), width));

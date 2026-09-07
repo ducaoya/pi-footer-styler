@@ -8,7 +8,7 @@
 
 ```
 zhipu/glm-5.3-flash • high                          [其他扩展状态]
-~\Desktop\ducaoya\pi-footer-styler (master)
+~/projects/pi-footer-styler (master)
 ↑1.2k ↓3.4k │ ¥0.123 │ ctx 42.3% │ cache 38%
 ```
 

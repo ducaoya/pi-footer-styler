@@ -1,8 +1,9 @@
 /**
  * pi-footer-styler — 自定义 pi 底部状态栏
  *
- * 显示内容（左 → 右）：
- *   git 分支 · token 用量（↑输入 ↓输出） · 累计花费    [扩展状态]  模型名
+ * 显示内容（两行）：
+ *   第一行：模型名（左）    [其他扩展状态（右）]
+ *   第二行：git 分支 · token 用量（↑输入 ↓输出） · 累计花费
  *
  * 命令：
  *   /footer          切换自定义底栏 <-> 默认底栏
@@ -62,29 +63,40 @@ export default function (pi: ExtensionAPI) {
 				invalidate() {},
 				render(width: number): string[] {
 					const { input, output, cost } = computeUsage(ctx);
+					const lines: string[] = [];
 
-					// 左侧：分支 · token · 花费
+					// 第一行：模型名（左） + 其他扩展状态（右，若存在）
+					const model = theme.fg(
+						"dim",
+						currentModelId ?? ctx.model?.id ?? "no model",
+					);
+					const statuses: string[] = [];
+					for (const s of footerData.getExtensionStatuses().values()) {
+						if (s) statuses.push(s);
+					}
+					const right = statuses.join(" ");
+					if (right) {
+						const avail = Math.max(0, width - visibleWidth(right) - 1);
+						const leftFitted = truncateToWidth(model, avail);
+						const gap = Math.max(
+							1,
+							width - visibleWidth(leftFitted) - visibleWidth(right),
+						);
+						lines.push(leftFitted + " ".repeat(gap) + right);
+					} else {
+						lines.push(truncateToWidth(model, width));
+					}
+
+					// 第二行：分支 · token · 花费
 					const branch = footerData.getGitBranch();
-					const leftParts: string[] = [
+					const parts = [
 						branch ? theme.fg("accent", branch) : theme.fg("dim", "no git"),
 						theme.fg("muted", `↑${fmtTokens(input)} ↓${fmtTokens(output)}`),
 						theme.fg("muted", fmtCost(cost)),
 					];
-					const left = leftParts.join(theme.fg("dim", " │ "));
+					lines.push(truncateToWidth(parts.join(theme.fg("dim", " │ ")), width));
 
-					// 右侧：其他扩展的状态 + 模型名
-					const rightParts: string[] = [];
-					for (const s of footerData.getExtensionStatuses().values()) {
-						if (s) rightParts.push(s);
-					}
-					rightParts.push(theme.fg("dim", currentModelId ?? ctx.model?.id ?? "no model"));
-
-					// 左右对齐；空间不足时优先截断左侧
-					const right = rightParts.join(" ");
-					const avail = Math.max(0, width - visibleWidth(right) - 1);
-					const leftFitted = truncateToWidth(left, avail);
-					const gap = Math.max(1, width - visibleWidth(leftFitted) - visibleWidth(right));
-					return [leftFitted + " ".repeat(gap) + right];
+					return lines;
 				},
 			};
 		});

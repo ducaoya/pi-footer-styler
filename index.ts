@@ -4,11 +4,12 @@
  * 显示内容（三行）：
  *   第一行：模型名 • 思考等级（左）    [其他扩展状态（右）]
  *   第二行：当前路径（git 分支）
- *   第三行：token 用量（↑输入 ↓输出） · 累计花费（货币符号可配） · 上下文占用 ctx% · 缓存低命中警示
+ *   第三行：token 用量（↑输入 ↓输出） · 累计花费（货币符号可配） · 上下文用量 ctx used/window (pct) · 缓存命中率 cache%
  *
- *   ctx%：来自 ctx.getContextUsage()，>90% 红（error）、>70% 黄（warning），压缩后未知时显示 "ctx ?"
- *   cache：最近一次请求的缓存命中率（cacheRead/(input+cacheRead+cacheWrite)），仅 <50% 时显示（正常不占空间），
- *          且要求会话 ≥2 条带 usage 的回复 + 累计出现过缓存 token（排除首轮未预热与不上报缓存的 provider）
+ *   ctx：来自 ctx.getContextUsage()；显示绝对量与百分比，>90% 红（error）、>70% 黄（warning），
+ *        压缩后下次响应前未知时显示 "ctx ?/200k"
+ *   cache：最近一次请求的缓存命中率（cacheRead/(input+cacheRead+cacheWrite)），provider 上报过缓存数据即常显，
+ *          <50% 黄色警示（正常 muted）
  *
  * git 分支：后台异步逐层向上探测（git.ts），与 pi 内置 FooterDataProvider 互为回退：
  *   自身探测 → footerData.getGitBranch() → no git
@@ -53,12 +54,14 @@ let currency: CurrencyDef = resolveCurrency(loadConfig().currency ?? "") ?? DEFA
 let requestRender: (() => void) | null = null;
 let footerGen = 0;
 
-// ---- 格式化工具 ----
+// ---- 格式化工具（口径与 pi 默认 footer 的 formatTokens 一致） ----
 
 function fmtTokens(n: number): string {
 	if (n < 1000) return `${n}`;
-	if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
-	return `${(n / 1_000_000).toFixed(2)}M`;
+	if (n < 10_000) return `${(n / 1000).toFixed(1)}k`;
+	if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
+	if (n < 10_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
+	return `${Math.round(n / 1_000_000)}M`;
 }
 
 // ---- 从当前会话分支统计 token / 花费 / 缓存（口径与 pi 默认 footer 一致） ----
@@ -71,8 +74,6 @@ interface UsageStats {
 	cacheTokens: number;
 	/** 最近一次请求的缓存命中率（%），无可计算数据时为 null */
 	latestCacheHitRate: number | null;
-	/** 携带 usage 的 assistant 消息数（缓存预热判断用） */
-	usageMessages: number;
 }
 
 function computeUsage(ctx: ExtensionContext): UsageStats {
@@ -80,7 +81,6 @@ function computeUsage(ctx: ExtensionContext): UsageStats {
 	let output = 0;
 	let cost = 0;
 	let cacheTokens = 0;
-	let usageMessages = 0;
 	let latestCacheHitRate: number | null = null;
 	for (const e of ctx.sessionManager.getBranch()) {
 		if (e.type === "message") {
@@ -94,7 +94,6 @@ function computeUsage(ctx: ExtensionContext): UsageStats {
 			cost += u.cost?.total ?? 0;
 			cacheTokens += (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
 			if (e.message.role === "assistant") {
-				usageMessages++;
 				const prompt = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
 				if (prompt > 0) {
 					latestCacheHitRate = ((u.cacheRead ?? 0) / prompt) * 100;
@@ -108,7 +107,7 @@ function computeUsage(ctx: ExtensionContext): UsageStats {
 			cacheTokens += (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
 		}
 	}
-	return { input, output, cost, cacheTokens, latestCacheHitRate, usageMessages };
+	return { input, output, cost, cacheTokens, latestCacheHitRate };
 }
 
 // ---- 渲染分支：自身探测 → pi 内置 → 无（返回 null 时不显示括号） ----
@@ -245,25 +244,26 @@ export default function (pi: ExtensionAPI) {
 						theme.fg("muted", formatCost(stats.cost, currency)),
 					];
 
-					// ctx：上下文窗口占用（口径同默认 footer：一位小数；>90% error、>70% warning）
-					// 压缩后、下次响应前 percent 未知，显示 "ctx ?"
+					// ctx：上下文用量（绝对量 + 百分比，口径同默认 footer：>90% error、>70% warning）
+					// 压缩后、下次响应前 tokens/percent 未知，显示 "ctx ?/200k"
 					const ctxUsage = ctx.getContextUsage();
-					if (ctxUsage && ctxUsage.percent != null) {
-						const color = ctxUsage.percent > 90 ? "error" : ctxUsage.percent > 70 ? "warning" : "muted";
-						parts.push(theme.fg(color, `ctx ${ctxUsage.percent.toFixed(1)}%`));
-					} else if (ctxUsage) {
-						parts.push(theme.fg("dim", "ctx ?"));
+					if (ctxUsage && ctxUsage.contextWindow > 0) {
+						const win = fmtTokens(ctxUsage.contextWindow);
+						if (ctxUsage.percent != null && ctxUsage.tokens != null) {
+							const color =
+								ctxUsage.percent > 90 ? "error" : ctxUsage.percent > 70 ? "warning" : "muted";
+							parts.push(
+								theme.fg(color, `ctx ${fmtTokens(ctxUsage.tokens)}/${win} (${Math.round(ctxUsage.percent)}%)`),
+							);
+						} else {
+							parts.push(theme.fg("dim", `ctx ?/${win}`));
+						}
 					}
 
-					// cache：最近一次请求的缓存命中率，仅异常（<50%）时显示
-					// 门槛：累计出现过缓存 token（排除不上报缓存的 provider）+ ≥2 条带 usage 的回复（排除首轮未预热）
-					if (
-						stats.cacheTokens > 0 &&
-						stats.usageMessages >= 2 &&
-						stats.latestCacheHitRate != null &&
-						stats.latestCacheHitRate < 50
-					) {
-						parts.push(theme.fg("warning", `cache ${Math.round(stats.latestCacheHitRate)}%`));
+					// cache：最近一次请求的缓存命中率；provider 上报过缓存数据即常显，<50% 黄色警示
+					if (stats.cacheTokens > 0 && stats.latestCacheHitRate != null) {
+						const rate = Math.round(stats.latestCacheHitRate);
+						parts.push(theme.fg(rate < 50 ? "warning" : "muted", `cache ${rate}%`));
 					}
 
 					lines.push(truncateToWidth(parts.join(theme.fg("dim", " │ ")), width));

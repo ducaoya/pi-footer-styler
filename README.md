@@ -15,6 +15,21 @@ main │ ↑1.2k ↓3.4k │ $0.123
 - **第二行**：git 分支（accent 色）· token 用量（↑ 输入 ↓ 输出，自动 k/M 格式化）· 累计花费
 - 无 git 仓库时显示 `no git`；模型切换、分支切换、token 累加均实时刷新
 
+## git 分支检测（git.ts）
+
+扩展内置了独立于 pi 的后台分支探测器，采用三级回退：
+
+```
+自身后台探测 → pi 内置 footerData.getGitBranch() → no git
+```
+
+探测逻辑：
+- 从会话 cwd **逐层向上**查找 `.git`（支持子目录启动）
+- 兼容 `.git` 为文件的场景（worktree / submodule，解析 `gitdir:` 相对/绝对路径）
+- 解析 `HEAD`：`ref: refs/heads/X` → 分支名；裸 hash → `detached:短hash`（pi 内置只显示 detached）
+- 实时性：监听 **HEAD 所在目录**而非文件本身（git 原子写 rename 覆盖会更换 inode），分支切换即时触发重绘
+- 全异步（`fs/promises`），不阻塞启动与渲染；watcher 随 footer 生命周期自动启停
+
 ## 命令
 
 | 命令 | 说明 |

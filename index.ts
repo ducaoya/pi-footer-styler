@@ -5,14 +5,22 @@
  *   第一行：模型名（左）    [其他扩展状态（右）]
  *   第二行：git 分支 · token 用量（↑输入 ↓输出） · 累计花费
  *
+ * git 分支：后台异步逐层向上探测（git.ts），与 pi 内置 FooterDataProvider 互为回退：
+ *   自身探测 → footerData.getGitBranch() → no git
+ *
  * 命令：
  *   /footer          切换自定义底栏 <-> 默认底栏
  *   /footer on|off   显式开启 / 关闭
  */
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
-import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
+import type {
+	ExtensionAPI,
+	ExtensionContext,
+	Theme,
+} from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { GitBranchWatcher, type GitState } from "./git";
 
 // ---- 模块级状态（跨 session_start 保持） ----
 let enabled = true;
@@ -51,15 +59,42 @@ function computeUsage(ctx: ExtensionContext): { input: number; output: number; c
 	return { input, output, cost };
 }
 
+// ---- 渲染分支元素：自身探测 → pi 内置 → no git ----
+
+function renderBranch(
+	theme: Theme,
+	gitState: GitState | null,
+	builtinBranch: string | null | undefined,
+): string {
+	if (gitState) {
+		return gitState.kind === "branch"
+			? theme.fg("accent", gitState.name)
+			: theme.fg("dim", `detached:${gitState.hash}`);
+	}
+	if (builtinBranch && builtinBranch !== "detached") {
+		return theme.fg("accent", builtinBranch);
+	}
+	if (builtinBranch === "detached") return theme.fg("dim", "detached");
+	return theme.fg("dim", "no git");
+}
+
 export default function (pi: ExtensionAPI) {
 	// 用最新 ctx 安装自定义底栏（session 切换 / reload 后需重新安装）
 	const applyFooter = (ctx: ExtensionContext) => {
 		ctx.ui.setFooter((tui, theme, footerData) => {
-			// git 分支变化时触发重绘
+			// git 分支变化时触发重绘（pi 内置检测）
 			const unsub = footerData.onBranchChange(() => tui.requestRender());
 
+			// 独立后台探测：逐层向上查找 .git 并监听 HEAD（异步，不阻塞）
+			// 每个 footer 实例持有自己的 watcher，dispose 只停自己的，避免会话切换竞态
+			const watcher = new GitBranchWatcher(ctx.cwd, () => tui.requestRender());
+			void watcher.start();
+
 			return {
-				dispose: unsub,
+				dispose() {
+					unsub();
+					watcher.stop();
+				},
 				invalidate() {},
 				render(width: number): string[] {
 					const { input, output, cost } = computeUsage(ctx);
@@ -88,9 +123,13 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					// 第二行：分支 · token · 花费
-					const branch = footerData.getGitBranch();
+					const branchEl = renderBranch(
+						theme,
+						watcher.getState(),
+						footerData.getGitBranch(),
+					);
 					const parts = [
-						branch ? theme.fg("accent", branch) : theme.fg("dim", "no git"),
+						branchEl,
 						theme.fg("muted", `↑${fmtTokens(input)} ↓${fmtTokens(output)}`),
 						theme.fg("muted", fmtCost(cost)),
 					];

@@ -7,13 +7,13 @@
 替换 pi 默认底栏，两行布局：
 
 ```
-zhipu/glm-5.3-flash                    [其他扩展状态]
-main │ ↑1.2k ↓3.4k │ $0.123
+zhipu/glm-5.3-flash • high                          [其他扩展状态]
+main │ ↑1.2k ↓3.4k │ ¥0.123
 ```
 
-- **第一行**：模型名（左，dim 色）；有其他扩展状态时右对齐展示
-- **第二行**：git 分支（accent 色）· token 用量（↑ 输入 ↓ 输出，自动 k/M 格式化）· 累计花费
-- 无 git 仓库时显示 `no git`；模型切换、分支切换、token 累加均实时刷新
+- **第一行**：模型名（左，dim 色）；模型支持推理时追加 `• 思考等级`（关闭时显示 `thinking off`）；有其他扩展状态时右对齐展示
+- **第二行**：git 分支（accent 色）· token 用量（↑ 输入 ↓ 输出，自动 k/M 格式化）· 累计花费（货币符号可配）
+- 模型切换、思考等级切换、git 分支切换、token 累加均实时刷新
 
 ## git 分支检测（git.ts）
 
@@ -36,6 +36,20 @@ main │ ↑1.2k ↓3.4k │ $0.123
 |------|------|
 | `/footer` | 自定义底栏 ↔ 默认底栏 切换 |
 | `/footer on` / `/footer off` | 显式开启 / 关闭 |
+| `/footer list` | 列出支持的货币 |
+| `/footer <code\|symbol>` | 设置费用单位，如 `/footer cny`、`/footer ¥`、`/footer eur`（持久化） |
+
+## 费用货币单位
+
+支持按代码或符号设置，内置注册表（`currency.ts`）：
+
+```
+usd $ · cny ¥ · eur € · gbp £ · jpy ¥ · krw ₩ · hkd HK$ · twd NT$ · sgd S$ · inr ₹ · rub ₽ · chf CHF
+```
+
+- 拓展新货币：在 `currency.ts` 的 `CURRENCIES` 中加一条即可（支持 `position: "suffix"` 后缀样式）
+- 选择持久化到 `~/.pi/agent/pi-footer-styler.json`，重启后保留
+- **注意**：仅切换展示符号，金额仍是 pi 基于模型计费价目算出的数值（美元口径），不做汇率换算
 
 ## 安装
 

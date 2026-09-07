@@ -2,15 +2,20 @@
  * pi-footer-styler — 自定义 pi 底部状态栏
  *
  * 显示内容（两行）：
- *   第一行：模型名（左）    [其他扩展状态（右）]
- *   第二行：git 分支 · token 用量（↑输入 ↓输出） · 累计花费
+ *   第一行：模型名 • 思考等级（左）    [其他扩展状态（右）]
+ *   第二行：git 分支 · token 用量（↑输入 ↓输出） · 累计花费（货币符号可配）
  *
  * git 分支：后台异步逐层向上探测（git.ts），与 pi 内置 FooterDataProvider 互为回退：
  *   自身探测 → footerData.getGitBranch() → no git
  *
+ * 思考等级：跟踪 ctx.thinkingLevel + thinking_level_select 事件，兼容运行时 "off" 与 undefined
+ * 费用单位：/footer <code|symbol> 切换（currency.ts 注册表），持久化到 ~/.pi/agent/pi-footer-styler.json
+ *
  * 命令：
- *   /footer          切换自定义底栏 <-> 默认底栏
- *   /footer on|off   显式开启 / 关闭
+ *   /footer                切换自定义底栏 <-> 默认底栏
+ *   /footer on|off         显式开启 / 关闭
+ *   /footer list           列出支持的货币
+ *   /footer <code|symbol>  设置费用单位（如 cny、¥、eur）
  */
 
 import type { AssistantMessage } from "@earendil-works/pi-ai";
@@ -20,11 +25,27 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { loadConfig, saveConfig } from "./config";
+import {
+	DEFAULT_CURRENCY,
+	formatCost,
+	listCurrencies,
+	resolveCurrency,
+	type CurrencyDef,
+} from "./currency";
 import { GitBranchWatcher, type GitState } from "./git";
 
 // ---- 模块级状态（跨 session_start 保持） ----
 let enabled = true;
-let currentModelId: string | undefined;
+/** 当前模型摘要（model_select 时刷新；ctx.model 是普通属性，需自行跟踪） */
+let currentModel: { id: string; reasoning: boolean } | undefined;
+/** 当前思考等级（兼容运行时 "off" 字符串与 undefined 两种关闭形态） */
+let currentThinkingLevel: string | undefined;
+/** 费用展示货币（启动时从配置文件读取） */
+let currency: CurrencyDef = resolveCurrency(loadConfig().currency ?? "") ?? DEFAULT_CURRENCY;
+/** 当前 footer 实例的重绘函数；gen 守卫防止旧实例 dispose 误清新实例 */
+let requestRender: (() => void) | null = null;
+let footerGen = 0;
 
 // ---- 格式化工具 ----
 
@@ -32,12 +53,6 @@ function fmtTokens(n: number): string {
 	if (n < 1000) return `${n}`;
 	if (n < 1_000_000) return `${(n / 1000).toFixed(1)}k`;
 	return `${(n / 1_000_000).toFixed(2)}M`;
-}
-
-function fmtCost(n: number): string {
-	if (n === 0) return "$0";
-	if (n < 1) return `$${n.toFixed(3)}`;
-	return `$${n.toFixed(2)}`;
 }
 
 // ---- 从当前会话分支统计 token 与花费 ----
@@ -82,29 +97,37 @@ export default function (pi: ExtensionAPI) {
 	// 用最新 ctx 安装自定义底栏（session 切换 / reload 后需重新安装）
 	const applyFooter = (ctx: ExtensionContext) => {
 		ctx.ui.setFooter((tui, theme, footerData) => {
+			const gen = ++footerGen;
+			requestRender = () => tui.requestRender();
+
 			// git 分支变化时触发重绘（pi 内置检测）
-			const unsub = footerData.onBranchChange(() => tui.requestRender());
+			const unsub = footerData.onBranchChange(() => requestRender?.());
 
 			// 独立后台探测：逐层向上查找 .git 并监听 HEAD（异步，不阻塞）
 			// 每个 footer 实例持有自己的 watcher，dispose 只停自己的，避免会话切换竞态
-			const watcher = new GitBranchWatcher(ctx.cwd, () => tui.requestRender());
+			const watcher = new GitBranchWatcher(ctx.cwd, () => requestRender?.());
 			void watcher.start();
 
 			return {
 				dispose() {
 					unsub();
 					watcher.stop();
+					if (gen === footerGen) requestRender = null;
 				},
 				invalidate() {},
 				render(width: number): string[] {
 					const { input, output, cost } = computeUsage(ctx);
 					const lines: string[] = [];
 
-					// 第一行：模型名（左） + 其他扩展状态（右，若存在）
-					const model = theme.fg(
-						"dim",
-						currentModelId ?? ctx.model?.id ?? "no model",
-					);
+					// 第一行：模型名 • 思考等级（左） + 其他扩展状态（右，若存在）
+					// 对齐 pi 默认 footer 风格：仅模型支持推理时展示等级，off 显示 "thinking off"
+					const modelId = currentModel?.id ?? ctx.model?.id ?? "no model";
+					const supportsReasoning = currentModel?.reasoning ?? ctx.model?.reasoning ?? false;
+					const lvl = currentThinkingLevel ?? "off";
+					const modelText = supportsReasoning
+						? `${modelId} • ${lvl === "off" ? "thinking off" : lvl}`
+						: modelId;
+					const model = theme.fg("dim", modelText);
 					const statuses: string[] = [];
 					for (const s of footerData.getExtensionStatuses().values()) {
 						if (s) statuses.push(s);
@@ -131,7 +154,7 @@ export default function (pi: ExtensionAPI) {
 					const parts = [
 						branchEl,
 						theme.fg("muted", `↑${fmtTokens(input)} ↓${fmtTokens(output)}`),
-						theme.fg("muted", fmtCost(cost)),
+						theme.fg("muted", formatCost(cost, currency)),
 					];
 					lines.push(truncateToWidth(parts.join(theme.fg("dim", " │ ")), width));
 
@@ -143,20 +166,55 @@ export default function (pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, ctx) => {
 		if (!ctx.hasUI) return;
-		currentModelId = ctx.model?.id;
+		currentModel = ctx.model ? { id: ctx.model.id, reasoning: ctx.model.reasoning } : undefined;
+		currentThinkingLevel = ctx.thinkingLevel;
 		if (enabled && ctx.mode === "tui") applyFooter(ctx);
 	});
 
-	// 切换模型时实时刷新模型名（ctx.model 是普通属性，需自行跟踪）
+	// 切换模型时实时刷新模型名与推理能力标记（ctx.model 是普通属性，需自行跟踪）
 	pi.on("model_select", async (event) => {
-		currentModelId = event.model.id;
+		currentModel = { id: event.model.id, reasoning: event.model.reasoning };
+		requestRender?.();
+	});
+
+	// 思考等级变化时刷新（运行时 level 可能为 "off"，类型标注不含）
+	pi.on("thinking_level_select", async (event) => {
+		currentThinkingLevel = event.level;
+		requestRender?.();
 	});
 
 	pi.registerCommand("footer", {
-		description: "Toggle custom footer (branch | tokens | cost | model)",
+		description: "Toggle custom footer; set cost currency (e.g. /footer cny)",
 		handler: async (args, ctx) => {
-			const arg = (args ?? "").trim().toLowerCase();
-			enabled = arg === "on" ? true : arg === "off" ? false : !enabled;
+			const raw = (args ?? "").trim();
+			const arg = raw.toLowerCase();
+			const [head, ...rest] = raw.split(/\s+/);
+			const headLower = (head ?? "").toLowerCase();
+
+			if (!raw) {
+				enabled = !enabled;
+			} else if (arg === "on" || arg === "off") {
+				enabled = arg === "on";
+			} else if (headLower === "list" || headLower === "units") {
+				ctx.ui.notify(`Supported currencies: ${listCurrencies()}`, "info");
+				return;
+			} else {
+				// /footer currency cny 或 /footer cny /footer ¥
+				const input = headLower === "currency" ? rest.join(" ") : raw;
+				const next = input ? resolveCurrency(input) : null;
+				if (!next) {
+					ctx.ui.notify(
+						`Unknown arg "${raw}". Usage: /footer [on|off|list|<code|symbol>]`,
+						"warning",
+						);
+					return;
+				}
+				currency = next;
+				saveConfig({ currency: next.code });
+				requestRender?.();
+				ctx.ui.notify(`Cost unit: ${next.symbol} (${next.name})`, "info");
+				return;
+			}
 
 			if (ctx.mode !== "tui") {
 				ctx.ui.notify(`Custom footer ${enabled ? "enabled" : "disabled"}`, "info");

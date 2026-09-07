@@ -8,12 +8,12 @@
 
 ```
 zhipu/glm-5.3-flash • high                          [其他扩展状态]
-~/projects/pi-footer-styler (master)
+~/projects/pi-footer-styler (master ↑1 ↓2 *3)
 ↑1.2k ↓3.4k │ ¥0.123 │ ctx 85k/200k (42%) │ cache 84k (99%)
 ```
 
 - **第一行**：模型名（dim 色）；模型支持推理时追加 `• 思考等级`（关闭时显示 `thinking off`）；有其他扩展状态时右对齐展示
-- **第二行**：当前路径（home 目录缩写为 `~`，超宽时保留尾部左侧截断）；在仓库内时括号内显示 git 分支（accent 色，detached 显示短 hash），不在仓库内则无括号
+- **第二行**：当前路径（home 目录缩写为 `~`，超宽时保留尾部左侧截断）；在仓库内时括号内显示 git 分支（accent 色，detached 显示短 hash），不在仓库内则无括号；分支后可跟状态计数（dim 色）：`↑1` 领先 upstream、`↓2` 落后 upstream、`*3` 未提交变更数（含未跟踪），**为 0 的段自动隐藏**，全为 0 时仅显示分支名
 - **第三行**：token 用量（↑ 输入 ↓ 输出）· 累计花费（货币符号可配）· 上下文用量 · 缓存命中率
   - **ctx**：`已用 token/窗口上限 (百分比)`，如 `ctx 85k/200k (42%)`；**>90% 红**、**>70% 黄**；压缩后下次响应前未知时显示 `ctx ?/200k`
   - **cache**：`命中量 (命中率)`，如 `cache 84k (99%)`——最近一次请求从缓存读取的 token 数与命中率（`cacheRead / (input+cacheRead+cacheWrite)`），provider 上报过缓存数据即常显；**<50% 黄色警示**（如缓存失效、前缀变动），正常为 muted 色。注：激进缓存的 provider（如 zhipu 自动缓存）命中率会饱和到 100%，属正常现象，以 token 量为主要参考
@@ -35,6 +35,8 @@ zhipu/glm-5.3-flash • high                          [其他扩展状态]
 - 解析 `HEAD`：`ref: refs/heads/X` → 分支名；裸 hash → `detached:短hash`（pi 内置只显示 detached）
 - 实时性：监听 **HEAD 所在目录**而非文件本身（git 原子写 rename 覆盖会更换 inode），分支切换即时触发重绘
 - 全异步（`fs/promises`），不阻塞启动与渲染；watcher 随 footer 生命周期自动启停
+
+**ahead / behind / 未提交计数**：后台异步调用 `git status --porcelain=v1 -b -z`（单次拿全三项），刷新时机：启动、分支切换、每轮 agent 结束（turn_end / agent_end）、低频兑底轮询（10s，捕捉终端里的手动提交）；带去重合并与 5s 超时，git 未安装 / 非仓库时静默降级为仅显示分支名
 
 ## 命令
 

@@ -3,7 +3,7 @@
  *
  * 显示内容（三行）：
  *   第一行：模型名 • 思考等级（左）    [其他扩展状态（右）]
- *   第二行：当前路径（git 分支）
+ *   第二行：当前路径（git 分支 [↑ahead ↓behind *未提交]，计数为 0 的段隐藏）
  *   第三行：token 用量（↑输入 ↓输出） · 累计花费（货币符号可配） · 上下文用量 ctx used/window (pct) · 缓存命中率 cache%
  *
  *   ctx：来自 ctx.getContextUsage()；显示绝对量与百分比，>90% 红（error）、>70% 黄（warning），
@@ -41,7 +41,7 @@ import {
 	resolveCurrency,
 	type CurrencyDef,
 } from "./currency";
-import { GitBranchWatcher, type GitState } from "./git";
+import { GitBranchWatcher, type GitState, type GitStatus } from "./git";
 
 // ---- 模块级状态（跨 session_start 保持） ----
 let enabled = true;
@@ -54,6 +54,8 @@ let currency: CurrencyDef = resolveCurrency(loadConfig().currency ?? "") ?? DEFA
 /** 当前 footer 实例的重绘函数；gen 守卫防止旧实例 dispose 误清新实例 */
 let requestRender: (() => void) | null = null;
 let footerGen = 0;
+/** 当前 footer 实例的 git watcher；agent 事件触发 status 刷新用 */
+let activeWatcher: GitBranchWatcher | null = null;
 
 // ---- 格式化工具（口径与 pi 默认 footer 的 formatTokens 一致） ----
 
@@ -124,6 +126,16 @@ interface BranchInfo {
 	colored: string;
 }
 
+/** 分支状态段：↑ahead ↓behind *dirty，为 0 的段隐藏；无数据返回空串 */
+function formatBranchStatus(status: GitStatus | null): string {
+	if (!status) return "";
+	const seg: string[] = [];
+	if (status.ahead > 0) seg.push(`↑${status.ahead}`);
+	if (status.behind > 0) seg.push(`↓${status.behind}`);
+	if (status.dirty > 0) seg.push(`*${status.dirty}`);
+	return seg.length ? ` ${seg.join(" ")}` : "";
+}
+
 function resolveBranch(
 	theme: Theme,
 	gitState: GitState | null,
@@ -182,13 +194,17 @@ export default function (pi: ExtensionAPI) {
 			// 独立后台探测：逐层向上查找 .git 并监听 HEAD（异步，不阻塞）
 			// 每个 footer 实例持有自己的 watcher，dispose 只停自己的，避免会话切换竞态
 			const watcher = new GitBranchWatcher(ctx.cwd, () => requestRender?.());
+			activeWatcher = watcher;
 			void watcher.start();
 
 			return {
 				dispose() {
 					unsub();
 					watcher.stop();
-					if (gen === footerGen) requestRender = null;
+					if (gen === footerGen) {
+						requestRender = null;
+						activeWatcher = null;
+					}
 				},
 				invalidate() {},
 				render(width: number): string[] {
@@ -221,20 +237,22 @@ export default function (pi: ExtensionAPI) {
 						lines.push(truncateToWidth(model, width));
 					}
 
-					// 第二行：当前路径（git 分支）
+					// 第二行：当前路径（git 分支 + ahead/behind/未提交计数）
 					const branchInfo = resolveBranch(
 						theme,
 						watcher.getState(),
 						footerData.getGitBranch(),
 					);
 					if (branchInfo) {
-						const suffixPlain = ` (${branchInfo.name})`;
+						const counts = formatBranchStatus(watcher.getStatus());
+						const suffixPlain = ` (${branchInfo.name}${counts})`;
 						const budget = Math.max(0, width - visibleWidth(suffixPlain) - 1);
 						const p = leftTruncate(shortenHome(ctx.cwd), budget);
 						lines.push(
 							theme.fg("muted", p) +
 								theme.fg("dim", " (") +
 								branchInfo.colored +
+								(counts ? theme.fg("dim", counts) : "") +
 								theme.fg("dim", ")"),
 						);
 					} else {
@@ -300,8 +318,14 @@ export default function (pi: ExtensionAPI) {
 	});
 
 	// usage / 上下文变化后刷新（流式期间 TUI 随消息更新自行重绘，这里兜底收尾时刻）
-	pi.on("turn_end", async () => requestRender?.());
-	pi.on("agent_end", async () => requestRender?.());
+	pi.on("turn_end", async () => {
+		activeWatcher?.refreshStatus();
+		requestRender?.();
+	});
+	pi.on("agent_end", async () => {
+		activeWatcher?.refreshStatus();
+		requestRender?.();
+	});
 	pi.on("session_compact", async () => requestRender?.());
 
 	pi.registerCommand("footer", {

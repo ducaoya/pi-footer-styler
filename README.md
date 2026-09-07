@@ -59,7 +59,25 @@ usd $ · cny ¥ · eur € · gbp £ · jpy ¥ · krw ₩ · hkd HK$ · twd NT$ 
 
 ## 安装
 
-### 方式一：全局启用（推荐）
+### 方式一：pi 包管理器（推荐）
+
+```bash
+# 从 npm 安装
+pi install npm:pi-footer-styler
+
+# 或从 GitHub 安装
+pi install git:github.com/ducaoya/pi-footer-styler
+```
+
+安装后自动启用，无需其他配置；更新用 `pi update npm:pi-footer-styler`。
+
+### 方式二：快速试一下
+
+```bash
+pi -e npm:pi-footer-styler
+```
+
+### 方式三：手动复制（开发者）
 
 把本目录复制（或软链接）到 pi 全局扩展目录：
 
@@ -68,15 +86,7 @@ usd $ · cny ¥ · eur € · gbp £ · jpy ¥ · krw ₩ · hkd HK$ · twd NT$ 
 Copy-Item -Recurse pi-footer-styler "$env:USERPROFILE\.pi\agent\extensions\pi-footer-styler"
 ```
 
-### 方式二：项目级启用
-
-复制到当前项目的 `.pi/extensions/` 下（需项目受信任）。
-
-### 方式三：快速测试
-
-```bash
-pi -e ./pi-footer-styler/index.ts
-```
+或复制到当前项目的 `.pi/extensions/` 下（需项目受信任）。
 
 > 使用 `/reload` 可在修改代码后热重载。
 

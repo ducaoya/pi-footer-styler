@@ -8,8 +8,9 @@
  *
  *   ctx：来自 ctx.getContextUsage()；显示绝对量与百分比，>90% 红（error）、>70% 黄（warning），
  *        压缩后下次响应前未知时显示 "ctx ?/200k"
- *   cache：最近一次请求的缓存命中率（cacheRead/(input+cacheRead+cacheWrite)），provider 上报过缓存数据即常显，
- *          <50% 黄色警示（正常 muted）
+ *   cache：最近一次请求的缓存命中量与命中率（cacheRead/(input+cacheRead+cacheWrite)），provider 上报过缓存数据即常显，
+ *          <50% 黄色警示（正常 muted）。百分比在激进缓存的 provider（如 zhipu 自动缓存）上会饱和到 100%，
+ *          故主展示 token 量（每轮变化，可感知缓存规模）
  *
  * git 分支：后台异步逐层向上探测（git.ts），与 pi 内置 FooterDataProvider 互为回退：
  *   自身探测 → footerData.getGitBranch() → no git
@@ -74,6 +75,8 @@ interface UsageStats {
 	cacheTokens: number;
 	/** 最近一次请求的缓存命中率（%），无可计算数据时为 null */
 	latestCacheHitRate: number | null;
+	/** 最近一次请求从缓存读取的 token 数 */
+	latestCacheRead: number | null;
 }
 
 function computeUsage(ctx: ExtensionContext): UsageStats {
@@ -82,6 +85,7 @@ function computeUsage(ctx: ExtensionContext): UsageStats {
 	let cost = 0;
 	let cacheTokens = 0;
 	let latestCacheHitRate: number | null = null;
+	let latestCacheRead: number | null = null;
 	for (const e of ctx.sessionManager.getBranch()) {
 		if (e.type === "message") {
 			if (e.message.role !== "assistant" && e.message.role !== "toolResult") continue;
@@ -94,6 +98,7 @@ function computeUsage(ctx: ExtensionContext): UsageStats {
 			cost += u.cost?.total ?? 0;
 			cacheTokens += (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
 			if (e.message.role === "assistant") {
+				latestCacheRead = u.cacheRead ?? 0;
 				const prompt = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
 				if (prompt > 0) {
 					latestCacheHitRate = ((u.cacheRead ?? 0) / prompt) * 100;
@@ -107,7 +112,7 @@ function computeUsage(ctx: ExtensionContext): UsageStats {
 			cacheTokens += (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
 		}
 	}
-	return { input, output, cost, cacheTokens, latestCacheHitRate };
+	return { input, output, cost, cacheTokens, latestCacheHitRate, latestCacheRead };
 }
 
 // ---- 渲染分支：自身探测 → pi 内置 → 无（返回 null 时不显示括号） ----
@@ -260,10 +265,11 @@ export default function (pi: ExtensionAPI) {
 						}
 					}
 
-					// cache：最近一次请求的缓存命中率；provider 上报过缓存数据即常显，<50% 黄色警示
-					if (stats.cacheTokens > 0 && stats.latestCacheHitRate != null) {
-						const rate = Math.round(stats.latestCacheHitRate);
-						parts.push(theme.fg(rate < 50 ? "warning" : "muted", `cache ${rate}%`));
+					// cache：缓存命中量（主展示，每轮变化）+ 命中率；provider 上报过缓存数据即常显，<50% 黄色警示
+					if (stats.cacheTokens > 0 && stats.latestCacheRead != null) {
+						const rate = stats.latestCacheHitRate != null ? Math.round(stats.latestCacheHitRate) : null;
+						const text = rate != null ? `cache ${fmtTokens(stats.latestCacheRead)} (${rate}%)` : `cache ${fmtTokens(stats.latestCacheRead)}`;
+						parts.push(theme.fg(rate != null && rate < 50 ? "warning" : "muted", text));
 					}
 
 					lines.push(truncateToWidth(parts.join(theme.fg("dim", " │ ")), width));

@@ -9,12 +9,15 @@
 ```
 zhipu/glm-5.3-flash • high                          [其他扩展状态]
 ~\Desktop\ducaoya\pi-footer-styler (master)
-↑1.2k ↓3.4k │ ¥0.123
+↑1.2k ↓3.4k │ ¥0.123 │ ctx 42.3% │ cache 38%
 ```
 
 - **第一行**：模型名（dim 色）；模型支持推理时追加 `• 思考等级`（关闭时显示 `thinking off`）；有其他扩展状态时右对齐展示
 - **第二行**：当前路径（home 目录缩写为 `~`，超宽时保留尾部左侧截断）；在仓库内时括号内显示 git 分支（accent 色，detached 显示短 hash），不在仓库内则无括号
-- **第三行**：token 用量（↑ 输入 ↓ 输出，自动 k/M 格式化）· 累计花费（货币符号可配）
+- **第三行**：token 用量（↑ 输入 ↓ 输出，自动 k/M 格式化）· 累计花费（货币符号可配）· 上下文占用 · 缓存低命中警示（仅异常时出现）
+  - **ctx%**：上下文窗口占用率（`ctx.getContextUsage()`，一位小数）；**>90% 红**、**>70% 黄**；压缩后下次响应前未知时显示 `ctx ?`
+  - **cache**：最近一次请求的缓存命中率（`cacheRead / (input+cacheRead+cacheWrite)`），仅 **<50%** 时以黄色显示（正常不占空间）；需会话 ≥2 条带用量回复且累计出现过缓存 token（排除首轮未预热与不上报缓存的 provider）
+  - 统计口径与 pi 默认 footer 一致：assistant 与 toolResult 的 usage 都计入，压缩/分支摘要条目的 usage 也计入
 - 模型切换、思考等级切换、git 分支切换、token 累加均实时刷新
 
 ## git 分支检测（git.ts）

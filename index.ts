@@ -4,7 +4,11 @@
  * 显示内容（三行）：
  *   第一行：模型名 • 思考等级（左）    [其他扩展状态（右）]
  *   第二行：当前路径（git 分支）
- *   第三行：token 用量（↑输入 ↓输出） · 累计花费（货币符号可配）
+ *   第三行：token 用量（↑输入 ↓输出） · 累计花费（货币符号可配） · 上下文占用 ctx% · 缓存低命中警示
+ *
+ *   ctx%：来自 ctx.getContextUsage()，>90% 红（error）、>70% 黄（warning），压缩后未知时显示 "ctx ?"
+ *   cache：最近一次请求的缓存命中率（cacheRead/(input+cacheRead+cacheWrite)），仅 <50% 时显示（正常不占空间），
+ *          且要求会话 ≥2 条带 usage 的回复 + 累计出现过缓存 token（排除首轮未预热与不上报缓存的 provider）
  *
  * git 分支：后台异步逐层向上探测（git.ts），与 pi 内置 FooterDataProvider 互为回退：
  *   自身探测 → footerData.getGitBranch() → no git
@@ -57,23 +61,54 @@ function fmtTokens(n: number): string {
 	return `${(n / 1_000_000).toFixed(2)}M`;
 }
 
-// ---- 从当前会话分支统计 token 与花费 ----
+// ---- 从当前会话分支统计 token / 花费 / 缓存（口径与 pi 默认 footer 一致） ----
 
-function computeUsage(ctx: ExtensionContext): { input: number; output: number; cost: number } {
+interface UsageStats {
+	input: number;
+	output: number;
+	cost: number;
+	/** 累计缓存 token（cacheRead + cacheWrite），0 表示 provider 从未上报缓存数据 */
+	cacheTokens: number;
+	/** 最近一次请求的缓存命中率（%），无可计算数据时为 null */
+	latestCacheHitRate: number | null;
+	/** 携带 usage 的 assistant 消息数（缓存预热判断用） */
+	usageMessages: number;
+}
+
+function computeUsage(ctx: ExtensionContext): UsageStats {
 	let input = 0;
 	let output = 0;
 	let cost = 0;
+	let cacheTokens = 0;
+	let usageMessages = 0;
+	let latestCacheHitRate: number | null = null;
 	for (const e of ctx.sessionManager.getBranch()) {
-		if (e.type === "message" && e.message.role === "assistant") {
+		if (e.type === "message") {
+			if (e.message.role !== "assistant" && e.message.role !== "toolResult") continue;
+			// assistant / toolResult 两种角色都携带 usage（默认 footer 同样统计二者）
 			const m = e.message as AssistantMessage;
-			if (m.usage) {
-				input += m.usage.input ?? 0;
-				output += m.usage.output ?? 0;
-				cost += m.usage.cost?.total ?? 0;
+			const u = m.usage;
+			if (!u) continue;
+			input += u.input ?? 0;
+			output += u.output ?? 0;
+			cost += u.cost?.total ?? 0;
+			cacheTokens += (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+			if (e.message.role === "assistant") {
+				usageMessages++;
+				const prompt = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
+				if (prompt > 0) {
+					latestCacheHitRate = ((u.cacheRead ?? 0) / prompt) * 100;
+				}
 			}
+		} else if ((e.type === "compaction" || e.type === "branch_summary") && e.usage) {
+			const u = e.usage;
+			input += u.input ?? 0;
+			output += u.output ?? 0;
+			cost += u.cost?.total ?? 0;
+			cacheTokens += (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
 		}
 	}
-	return { input, output, cost };
+	return { input, output, cost, cacheTokens, latestCacheHitRate, usageMessages };
 }
 
 // ---- 渲染分支：自身探测 → pi 内置 → 无（返回 null 时不显示括号） ----
@@ -153,7 +188,7 @@ export default function (pi: ExtensionAPI) {
 				},
 				invalidate() {},
 				render(width: number): string[] {
-					const { input, output, cost } = computeUsage(ctx);
+					const stats = computeUsage(ctx);
 					const lines: string[] = [];
 
 					// 第一行：模型名 • 思考等级（左） + 其他扩展状态（右，若存在）
@@ -204,11 +239,33 @@ export default function (pi: ExtensionAPI) {
 						);
 					}
 
-					// 第三行：token · 花费
+					// 第三行：token · 花费 · 上下文占用 · 缓存低命中警示
 					const parts = [
-						theme.fg("muted", `↑${fmtTokens(input)} ↓${fmtTokens(output)}`),
-						theme.fg("muted", formatCost(cost, currency)),
+						theme.fg("muted", `↑${fmtTokens(stats.input)} ↓${fmtTokens(stats.output)}`),
+						theme.fg("muted", formatCost(stats.cost, currency)),
 					];
+
+					// ctx：上下文窗口占用（口径同默认 footer：一位小数；>90% error、>70% warning）
+					// 压缩后、下次响应前 percent 未知，显示 "ctx ?"
+					const ctxUsage = ctx.getContextUsage();
+					if (ctxUsage && ctxUsage.percent != null) {
+						const color = ctxUsage.percent > 90 ? "error" : ctxUsage.percent > 70 ? "warning" : "muted";
+						parts.push(theme.fg(color, `ctx ${ctxUsage.percent.toFixed(1)}%`));
+					} else if (ctxUsage) {
+						parts.push(theme.fg("dim", "ctx ?"));
+					}
+
+					// cache：最近一次请求的缓存命中率，仅异常（<50%）时显示
+					// 门槛：累计出现过缓存 token（排除不上报缓存的 provider）+ ≥2 条带 usage 的回复（排除首轮未预热）
+					if (
+						stats.cacheTokens > 0 &&
+						stats.usageMessages >= 2 &&
+						stats.latestCacheHitRate != null &&
+						stats.latestCacheHitRate < 50
+					) {
+						parts.push(theme.fg("warning", `cache ${Math.round(stats.latestCacheHitRate)}%`));
+					}
+
 					lines.push(truncateToWidth(parts.join(theme.fg("dim", " │ ")), width));
 
 					return lines;
@@ -235,6 +292,11 @@ export default function (pi: ExtensionAPI) {
 		currentThinkingLevel = event.level;
 		requestRender?.();
 	});
+
+	// usage / 上下文变化后刷新（流式期间 TUI 随消息更新自行重绘，这里兜底收尾时刻）
+	pi.on("turn_end", async () => requestRender?.());
+	pi.on("agent_end", async () => requestRender?.());
+	pi.on("session_compact", async () => requestRender?.());
 
 	pi.registerCommand("footer", {
 		description: "Toggle custom footer; set cost currency (e.g. /footer cny)",

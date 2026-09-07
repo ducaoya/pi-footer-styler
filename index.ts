@@ -1,9 +1,10 @@
 /**
  * pi-footer-styler — 自定义 pi 底部状态栏
  *
- * 显示内容（两行）：
+ * 显示内容（三行）：
  *   第一行：模型名 • 思考等级（左）    [其他扩展状态（右）]
- *   第二行：git 分支 · token 用量（↑输入 ↓输出） · 累计花费（货币符号可配）
+ *   第二行：当前路径（git 分支）
+ *   第三行：token 用量（↑输入 ↓输出） · 累计花费（货币符号可配）
  *
  * git 分支：后台异步逐层向上探测（git.ts），与 pi 内置 FooterDataProvider 互为回退：
  *   自身探测 → footerData.getGitBranch() → no git
@@ -25,6 +26,7 @@ import type {
 	Theme,
 } from "@earendil-works/pi-coding-agent";
 import { truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
+import { homedir } from "node:os";
 import { loadConfig, saveConfig } from "./config";
 import {
 	DEFAULT_CURRENCY,
@@ -74,23 +76,58 @@ function computeUsage(ctx: ExtensionContext): { input: number; output: number; c
 	return { input, output, cost };
 }
 
-// ---- 渲染分支元素：自身探测 → pi 内置 → no git ----
+// ---- 渲染分支：自身探测 → pi 内置 → 无（返回 null 时不显示括号） ----
 
-function renderBranch(
+interface BranchInfo {
+	/** 纯文本分支名（用于宽度计算与括号内展示） */
+	name: string;
+	/** 着色后的分支名（用于渲染） */
+	colored: string;
+}
+
+function resolveBranch(
 	theme: Theme,
 	gitState: GitState | null,
 	builtinBranch: string | null | undefined,
-): string {
+): BranchInfo | null {
 	if (gitState) {
 		return gitState.kind === "branch"
-			? theme.fg("accent", gitState.name)
-			: theme.fg("dim", `detached:${gitState.hash}`);
+			? { name: gitState.name, colored: theme.fg("accent", gitState.name) }
+			: {
+					name: `detached:${gitState.hash}`,
+					colored: theme.fg("dim", `detached:${gitState.hash}`),
+				};
 	}
 	if (builtinBranch && builtinBranch !== "detached") {
-		return theme.fg("accent", builtinBranch);
+		return { name: builtinBranch, colored: theme.fg("accent", builtinBranch) };
 	}
-	if (builtinBranch === "detached") return theme.fg("dim", "detached");
-	return theme.fg("dim", "no git");
+	if (builtinBranch === "detached") {
+		return { name: "detached", colored: theme.fg("dim", "detached") };
+	}
+	return null;
+}
+
+// ---- 路径展示：home 缩写 + 超宽时保留尾部的左截断 ----
+
+function shortenHome(p: string): string {
+	const home = homedir();
+	if (p === home) return "~";
+	if (p.startsWith(home)) {
+		const rest = p.slice(home.length);
+		if (rest.startsWith("\\") || rest.startsWith("/")) return `~${rest}`;
+	}
+	return p;
+}
+
+/** 超宽时从左侧丢弃、以 … 开头（保留最深层级）；s 需为纯文本 */
+function leftTruncate(s: string, maxWidth: number): string {
+	if (maxWidth <= 0) return "";
+	if (visibleWidth(s) <= maxWidth) return s;
+	let out = s;
+	while (out.length > 0 && visibleWidth(`…${out}`) > maxWidth) {
+		out = out.slice(1);
+	}
+	return out ? `…${out}` : "…";
 }
 
 export default function (pi: ExtensionAPI) {
@@ -145,14 +182,30 @@ export default function (pi: ExtensionAPI) {
 						lines.push(truncateToWidth(model, width));
 					}
 
-					// 第二行：分支 · token · 花费
-					const branchEl = renderBranch(
+					// 第二行：当前路径（git 分支）
+					const branchInfo = resolveBranch(
 						theme,
 						watcher.getState(),
 						footerData.getGitBranch(),
 					);
+					if (branchInfo) {
+						const suffixPlain = ` (${branchInfo.name})`;
+						const budget = Math.max(0, width - visibleWidth(suffixPlain) - 1);
+						const p = leftTruncate(shortenHome(ctx.cwd), budget);
+						lines.push(
+							theme.fg("muted", p) +
+								theme.fg("dim", " (") +
+								branchInfo.colored +
+								theme.fg("dim", ")"),
+						);
+					} else {
+						lines.push(
+							theme.fg("muted", leftTruncate(shortenHome(ctx.cwd), Math.max(0, width - 1))),
+						);
+					}
+
+					// 第三行：token · 花费
 					const parts = [
-						branchEl,
 						theme.fg("muted", `↑${fmtTokens(input)} ↓${fmtTokens(output)}`),
 						theme.fg("muted", formatCost(cost, currency)),
 					];

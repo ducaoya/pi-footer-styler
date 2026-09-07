@@ -1,0 +1,39 @@
+{
+	"name": "pi-footer-styler",
+	"version": "0.1.0",
+	"description": "Custom status-bar footer for the pi coding agent — model, thinking level, path, git branch, token usage, cost, context window usage, and cache hit rate.",
+	"license": "MIT",
+	"type": "module",
+	"keywords": [
+		"pi-package",
+		"pi",
+		"footer",
+		"status-bar",
+		"extension"
+	],
+	"repository": {
+		"type": "git",
+		"url": "git+https://github.com/ducaoya/pi-footer-styler.git"
+	},
+	"engines": {
+		"node": ">=20"
+	},
+	"files": [
+		"index.ts",
+		"config.ts",
+		"currency.ts",
+		"git.ts",
+		"README.md",
+		"LICENSE"
+	],
+	"pi": {
+		"extensions": [
+			"./index.ts"
+		]
+	},
+	"peerDependencies": {
+		"@earendil-works/pi-ai": "*",
+		"@earendil-works/pi-coding-agent": "*",
+		"@earendil-works/pi-tui": "*"
+	}
+}

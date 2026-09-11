@@ -28,6 +28,7 @@ pi remove  /absolute/path/to/pi-footer-styler   # 切回 npm 版
 pi install npm:pi-footer-styler
 ```
 
+- **升级 npm 版**：`pi update npm:pi-footer-styler` 受 lockfile 约束、**不会跨版本更新**；要装最新版需 `pi remove npm:pi-footer-styler && pi install npm:pi-footer-styler`。
 - pi 以 `jiti(moduleCache: false)` 加载扩展，`/reload` 会重新读盘，无需重启。
 - 语法自检（无 tsc 时）：`node --experimental-strip-types --check index.ts`。
 - 快速验证渲染（不依赖 TUI）：用 mock 驱动 `index.ts` 默认导出——伪造 `pi.on` 捕获事件处理器、

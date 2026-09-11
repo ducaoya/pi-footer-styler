@@ -39,6 +39,10 @@ jobs:
       contents: read
       id-token: write # Trusted Publishing 必需的 OIDC 权限
     steps:
+      # 提前设定默认分支名，静音 checkout 时 git 的 init.defaultBranch 提示
+      - name: Silence git default-branch hint
+        run: git config --global init.defaultBranch main
+
       - uses: actions/checkout@v6
 
       - uses: actions/setup-node@v6

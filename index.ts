@@ -4,13 +4,16 @@
  * 显示内容（三行）：
  *   第一行：模型名 • 思考等级（左）    [其他扩展状态（右）]
  *   第二行：当前路径（git 分支 [↑ahead ↓behind *未提交]，计数为 0 的段隐藏）
- *   第三行：token 用量（↑输入 ↓输出） · 累计花费（货币符号可配） · 上下文用量 ctx used/window (pct) · 缓存命中率 cache%
+ *   第三行：token 用量（↑输入 ↓输出） · 累计花费（货币符号可配） · 上下文用量 ctx used/window (pct) · 缓存命中率 cache% · 生成吞吐 speed tok/s
  *
  *   ctx：来自 ctx.getContextUsage()；显示绝对量与百分比，>90% 红（error）、>70% 黄（warning），
  *        压缩后下次响应前未知时显示 "ctx ?/200k"
  *   cache：最近一次请求的缓存命中量与命中率（cacheRead/(input+cacheRead+cacheWrite)），provider 上报过缓存数据即常显，
  *          <50% 黄色警示（正常 muted）。命中率一位小数（99.8%），激进缓存的 provider 上也贴近但不等于 100%，
  *          主展示 token 量（每轮变化，可感知缓存规模）
+ *   speed：最近一次助手响应的输出吞吐（usage.output / 生成耗时）。message_start 记录请求起点，
+ *          首个流式增量（text/thinking/toolcall delta）到达时作为生成起点以剔除 TTFT，
+ *          在 message_end 用真实 usage.output 结算；含思考 token（output 本身含 reasoning）
  *
  * git 分支：后台异步逐层向上探测（git.ts），与 pi 内置 FooterDataProvider 互为回退：
  *   自身探测 → footerData.getGitBranch() → no git
@@ -56,6 +59,11 @@ let requestRender: (() => void) | null = null;
 let footerGen = 0;
 /** 当前 footer 实例的 git watcher；agent 事件触发 status 刷新用 */
 let activeWatcher: GitBranchWatcher | null = null;
+/** 最近一次助手响应的输出吞吐（tok/s），null 表示暂无数据 */
+let lastSpeed: number | null = null;
+/** 当前助手响应的请求起点 / 首个流式增量到达时刻（ms），用于剔除 TTFT 估算生成耗时 */
+let genStart: number | null = null;
+let firstDeltaAt: number | null = null;
 
 // ---- 格式化工具（口径与 pi 默认 footer 的 formatTokens 一致） ----
 
@@ -65,6 +73,13 @@ function fmtTokens(n: number): string {
 	if (n < 1_000_000) return `${Math.round(n / 1000)}k`;
 	if (n < 10_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
 	return `${Math.round(n / 1_000_000)}M`;
+}
+
+/** 吞吐格式化：>=100 取整，>=10 一位小数，否则两位小数 */
+function fmtSpeed(tps: number): string {
+	if (tps >= 100) return `${Math.round(tps)} tok/s`;
+	if (tps >= 10) return `${tps.toFixed(1)} tok/s`;
+	return `${tps.toFixed(2)} tok/s`;
 }
 
 // ---- 从当前会话分支统计 token / 花费 / 缓存（口径与 pi 默认 footer 一致） ----
@@ -291,6 +306,11 @@ export default function (pi: ExtensionAPI) {
 						parts.push(theme.fg(rate != null && stats.latestCacheHitRate! < 50 ? "warning" : "muted", text));
 					}
 
+					// speed：最近一次响应的输出吞吐（tok/s），仅在拿到真实 usage 后显示
+					if (lastSpeed != null) {
+						parts.push(theme.fg("muted", `speed ${fmtSpeed(lastSpeed)}`));
+					}
+
 					lines.push(truncateToWidth(parts.join(theme.fg("dim", " │ ")), width));
 
 					return lines;
@@ -303,18 +323,52 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.hasUI) return;
 		currentModel = ctx.model ? { id: ctx.model.id, reasoning: ctx.model.reasoning } : undefined;
 		currentThinkingLevel = ctx.thinkingLevel;
+		lastSpeed = null; // 新会话的吞吐从本会话首次响应重新统计
+		genStart = null;
+		firstDeltaAt = null;
 		if (enabled && ctx.mode === "tui") applyFooter(ctx);
 	});
 
 	// 切换模型时实时刷新模型名与推理能力标记（ctx.model 是普通属性，需自行跟踪）
 	pi.on("model_select", async (event) => {
 		currentModel = { id: event.model.id, reasoning: event.model.reasoning };
+		lastSpeed = null; // 换模型后旧吞吐不再代表当前模型
 		requestRender?.();
 	});
 
 	// 思考等级变化时刷新（运行时 level 可能为 "off"，类型标注不含）
 	pi.on("thinking_level_select", async (event) => {
 		currentThinkingLevel = event.level;
+		requestRender?.();
+	});
+
+	// ---- 生成吞吐估算：message_start 记请求起点，首个 delta 剔除 TTFT，message_end 用真实 usage 结算 ----
+	pi.on("message_start", async (event) => {
+		if (event.message.role !== "assistant") return;
+		genStart = Date.now();
+		firstDeltaAt = null;
+	});
+
+	pi.on("message_update", async (event) => {
+		if (event.message.role !== "assistant" || firstDeltaAt != null) return;
+		const t = event.assistantMessageEvent.type;
+		if (t === "text_delta" || t === "thinking_delta" || t === "toolcall_delta") {
+			firstDeltaAt = Date.now();
+		}
+	});
+
+	pi.on("message_end", async (event) => {
+		if (event.message.role !== "assistant") return;
+		const usage = (event.message as AssistantMessage).usage;
+		if (genStart != null && usage && usage.output > 0) {
+			const end = Date.now();
+			// 优先用「首个增量 → 结束」剔除首 token 延迟；增量过短（<200ms）时回退到整体耗时，避免除零放大
+			const genElapsed = (end - (firstDeltaAt ?? genStart)) / 1000;
+			const secs = genElapsed >= 0.2 ? genElapsed : (end - genStart) / 1000;
+			if (secs > 0) lastSpeed = usage.output / secs;
+		}
+		genStart = null;
+		firstDeltaAt = null;
 		requestRender?.();
 	});
 

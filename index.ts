@@ -4,16 +4,17 @@
  * 显示内容（三行）：
  *   第一行：模型名 • 思考等级（左）    [其他扩展状态（右）]
  *   第二行：当前路径（git 分支 [↑ahead ↓behind *未提交]，计数为 0 的段隐藏）
- *   第三行：token 用量（↑输入 ↓输出） · 累计花费（货币符号可配） · 上下文用量 ctx used/window (pct) · 缓存命中率 cache% · 生成吞吐 speed tok/s
+ *   第三行：token 用量（↑输入 ↓输出） · 累计花费（货币符号可配） · 上下文用量 ctx used/window (pct) · 缓存命中率 cache% · 生成速度 tok/s
  *
  *   ctx：来自 ctx.getContextUsage()；显示绝对量与百分比，>90% 红（error）、>70% 黄（warning），
  *        压缩后下次响应前未知时显示 "ctx ?/200k"
  *   cache：最近一次请求的缓存命中量与命中率（cacheRead/(input+cacheRead+cacheWrite)），provider 上报过缓存数据即常显，
  *          <50% 黄色警示（正常 muted）。命中率一位小数（99.8%），激进缓存的 provider 上也贴近但不等于 100%，
  *          主展示 token 量（每轮变化，可感知缓存规模）
- *   speed：最近一次助手响应的输出吞吐（usage.output / 生成耗时）。message_start 记录请求起点，
+ *   速率：最近一次助手响应的输出速率（usage.output / 生成耗时，单位 tok/s）。message_start 记录请求起点，
  *          首个流式增量（text/thinking/toolcall delta）到达时作为生成起点以剔除 TTFT，
- *          在 message_end 用真实 usage.output 结算；含思考 token（output 本身含 reasoning）
+ *          在 message_end 用真实 usage.output 结算；含思考 token（output 本身含 reasoning）。
+ *          只展示「量 + 单位」（如 87 tok/s），不加 speed 前缀，符合最主流状态栏表述
  *
  * git 分支：后台异步逐层向上探测（git.ts），与 pi 内置 FooterDataProvider 互为回退：
  *   自身探测 → footerData.getGitBranch() → no git
@@ -59,7 +60,7 @@ let requestRender: (() => void) | null = null;
 let footerGen = 0;
 /** 当前 footer 实例的 git watcher；agent 事件触发 status 刷新用 */
 let activeWatcher: GitBranchWatcher | null = null;
-/** 最近一次助手响应的输出吞吐（tok/s），null 表示暂无数据 */
+/** 最近一次助手响应的输出速率（tok/s），null 表示暂无数据 */
 let lastSpeed: number | null = null;
 /** 当前助手响应的请求起点 / 首个流式增量到达时刻（ms），用于剔除 TTFT 估算生成耗时 */
 let genStart: number | null = null;
@@ -75,7 +76,7 @@ function fmtTokens(n: number): string {
 	return `${Math.round(n / 1_000_000)}M`;
 }
 
-/** 吞吐格式化：>=100 取整，>=10 一位小数，否则两位小数 */
+/** 速率格式化（只输出量+单位，如 "87 tok/s"）：>=100 取整，>=10 一位小数，否则两位小数 */
 function fmtSpeed(tps: number): string {
 	if (tps >= 100) return `${Math.round(tps)} tok/s`;
 	if (tps >= 10) return `${tps.toFixed(1)} tok/s`;
@@ -306,9 +307,9 @@ export default function (pi: ExtensionAPI) {
 						parts.push(theme.fg(rate != null && stats.latestCacheHitRate! < 50 ? "warning" : "muted", text));
 					}
 
-					// speed：最近一次响应的输出吞吐（tok/s），仅在拿到真实 usage 后显示
+					// 生成速度：最近一次响应的输出速率（tok/s），仅在拿到真实 usage 后显示；只展示量+单位
 					if (lastSpeed != null) {
-						parts.push(theme.fg("muted", `speed ${fmtSpeed(lastSpeed)}`));
+						parts.push(theme.fg("muted", fmtSpeed(lastSpeed)));
 					}
 
 					lines.push(truncateToWidth(parts.join(theme.fg("dim", " │ ")), width));
@@ -323,7 +324,7 @@ export default function (pi: ExtensionAPI) {
 		if (!ctx.hasUI) return;
 		currentModel = ctx.model ? { id: ctx.model.id, reasoning: ctx.model.reasoning } : undefined;
 		currentThinkingLevel = ctx.thinkingLevel;
-		lastSpeed = null; // 新会话的吞吐从本会话首次响应重新统计
+		lastSpeed = null; // 新会话的速率从本会话首次响应重新统计
 		genStart = null;
 		firstDeltaAt = null;
 		if (enabled && ctx.mode === "tui") applyFooter(ctx);
@@ -332,7 +333,7 @@ export default function (pi: ExtensionAPI) {
 	// 切换模型时实时刷新模型名与推理能力标记（ctx.model 是普通属性，需自行跟踪）
 	pi.on("model_select", async (event) => {
 		currentModel = { id: event.model.id, reasoning: event.model.reasoning };
-		lastSpeed = null; // 换模型后旧吞吐不再代表当前模型
+		lastSpeed = null; // 换模型后旧速率不再代表当前模型
 		requestRender?.();
 	});
 
@@ -342,7 +343,7 @@ export default function (pi: ExtensionAPI) {
 		requestRender?.();
 	});
 
-	// ---- 生成吞吐估算：message_start 记请求起点，首个 delta 剔除 TTFT，message_end 用真实 usage 结算 ----
+	// ---- 生成速度估算：message_start 记请求起点，首个 delta 剔除 TTFT，message_end 用真实 usage 结算 ----
 	pi.on("message_start", async (event) => {
 		if (event.message.role !== "assistant") return;
 		genStart = Date.now();

@@ -93,6 +93,25 @@ Copy-Item -Recurse pi-footer-styler "$env:USERPROFILE\.pi\agent\extensions\pi-fo
 
 > 使用 `/reload` 可在修改代码后热重载。
 
+## 发布（维护者）
+
+采用 **npm Trusted Publishing（OIDC）**，无需任何长期 token；由 GitHub Actions 在满足条件时自动发布（`.github/workflows/publish.yml`）。
+
+**触发条件**（同时满足）：
+1. 代码推送到 `master` 分支
+2. 该次推送的**最新一条提交信息包含关键字 `[release]`**
+
+```bash
+# 发版（自动 bump 版本 + 生成提交与 vX.Y.Z tag）
+npm version patch -m "chore(release): %s [release]"   # 或 minor / major
+git push origin master --follow-tags
+```
+
+随后 Actions 会自动：升级 npm → 校验版本未发布 → `npm publish --provenance`。
+
+> **首次配置（仅一次）**：npm 包页 → Settings → Trusted Publisher → GitHub Actions，填 `ducaoya` / `pi-footer-styler` / `publish.yml`。
+> 若同一版本已存在于 npm，workflow 会自动跳过，不会报错。
+
 ## 依赖
 
 无。运行时依赖（`@earendil-works/pi-ai`、`@earendil-works/pi-tui`）由 pi 宿主自动解析。

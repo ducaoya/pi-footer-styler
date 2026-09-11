@@ -1,0 +1,71 @@
+# 发布流程：npm Trusted Publishing（OIDC，无需任何长期 token）
+#
+# ── 触发条件（两者同时满足才发布）───────────────────────────────
+#   1. 推送到 master 分支
+#   2. 该次推送的「最新一条提交信息」包含关键字 [release]
+#
+# ── 本地发版 ─────────────────────────────────────────────────
+#   npm version patch -m "chore(release): %s [release]"
+#   git push origin master --follow-tags
+#   （npm version 会自动 bump package.json、生成提交与 vX.Y.Z tag）
+#
+# ── 仅一次的前置配置（npm 网页，无法用代码完成）────────────────
+#   npm 包页 → Settings → Trusted Publisher → GitHub Actions
+#     Repository owner : ducaoya
+#     Repository name  : pi-footer-styler
+#     Workflow name    : publish.yml     ← 必须与本文件名一致
+#     Environment      : （留空）
+
+name: Publish
+
+on:
+  push:
+    branches: [master]
+
+# 防止多次发布并发互相覆盖
+concurrency:
+  group: npm-publish
+  cancel-in-progress: false
+
+jobs:
+  publish:
+    # 只在本仓库 + 最新提交含 [release] 时执行；否则整个 job 跳过（不消耗构建额度）
+    if: >
+      github.repository == 'ducaoya/pi-footer-styler' &&
+      contains(github.event.head_commit.message, '[release]')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write # Trusted Publishing 必需的 OIDC 权限
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          registry-url: https://registry.npmjs.org
+
+      # Trusted Publishing 需要 npm >= 11.5.1
+      - name: Upgrade npm
+        run: npm install -g npm@latest
+
+      - name: Resolve package version
+        id: ver
+        run: |
+          echo "version=$(node -p 'require("./package.json").version')" >> "$GITHUB_OUTPUT"
+
+      # 兜底：同名版本已发布则跳过，避免重复发布导致 job 失败
+      - name: Guard against duplicate publish
+        id: guard
+        run: |
+          v="${{ steps.ver.outputs.version }}"
+          if npm view "pi-footer-styler@$v" version >/dev/null 2>&1; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::pi-footer-styler@$v 已存在于 npm，跳过发布"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Publish to npm
+        if: steps.guard.outputs.skip != 'true'
+        run: npm publish --provenance --access public

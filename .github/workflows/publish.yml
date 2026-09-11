@@ -39,14 +39,15 @@ jobs:
       contents: read
       id-token: write # Trusted Publishing 必需的 OIDC 权限
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v6
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v6
         with:
-          node-version: 22
+          node-version: 24
           registry-url: https://registry.npmjs.org
+          package-manager-cache: false # 发布构建不使用缓存
 
-      # Trusted Publishing 需要 npm >= 11.5.1
+      # 兑底保证 npm >= 11.5.1（Trusted Publishing 要求）
       - name: Upgrade npm
         run: npm install -g npm@latest
 

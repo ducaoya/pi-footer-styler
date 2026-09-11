@@ -2,10 +2,11 @@
 #
 # ── 触发条件（两者同时满足才发布）───────────────────────────────
 #   1. 推送到 master 分支
-#   2. 该次推送的「最新一条提交信息」包含关键字 [release]
+#   2. 该次推送的「最新一条提交」的主题（首行）以 [release] 开头
+#      （用 startsWith 只认首行，避免正文/文档里提到关键字就误触发）
 #
 # ── 本地发版 ─────────────────────────────────────────────────
-#   npm version patch -m "chore(release): %s [release]"
+#   npm version patch -m "[release] %s"
 #   git push origin master --follow-tags
 #   （npm version 会自动 bump package.json、生成提交与 vX.Y.Z tag）
 #
@@ -29,10 +30,10 @@ concurrency:
 
 jobs:
   publish:
-    # 只在本仓库 + 最新提交含 [release] 时执行；否则整个 job 跳过（不消耗构建额度）
+    # 只在本仓库 + 最新提交的「主题（首行）」以 [release] 开头时才执行；否则整个 job 跳过
     if: >
       github.repository == 'ducaoya/pi-footer-styler' &&
-      contains(github.event.head_commit.message, '[release]')
+      startsWith(github.event.head_commit.message, '[release]')
     runs-on: ubuntu-latest
     permissions:
       contents: read

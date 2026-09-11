@@ -99,11 +99,11 @@ Copy-Item -Recurse pi-footer-styler "$env:USERPROFILE\.pi\agent\extensions\pi-fo
 
 **触发条件**（同时满足）：
 1. 代码推送到 `master` 分支
-2. 该次推送的**最新一条提交信息包含关键字 `[release]`**
+2. 该次推送的**最新一条提交的主题（首行）以 `[release]` 开头**（仅匹配主题，避免正文提及关键字误触发）
 
 ```bash
 # 发版（自动 bump 版本 + 生成提交与 vX.Y.Z tag）
-npm version patch -m "chore(release): %s [release]"   # 或 minor / major
+npm version patch -m "[release] %s"   # 或 minor / major
 git push origin master --follow-tags
 ```
 

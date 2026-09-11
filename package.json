@@ -1,6 +1,6 @@
 {
 	"name": "pi-footer-styler",
-	"version": "0.1.6",
+	"version": "0.1.7",
 	"description": "Custom status-bar footer for the pi coding agent — model, thinking level, path, git branch, token usage, cost, context window usage, and cache hit rate, and generation throughput.",
 	"license": "MIT",
 	"type": "module",

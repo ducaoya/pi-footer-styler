@@ -4,7 +4,11 @@
  * 显示内容（三行）：
  *   第一行：模型名 • 思考等级（左）    [其他扩展状态（右）]
  *   第二行：当前路径（git 分支 [↑ahead ↓behind *未提交]，计数为 0 的段隐藏）
- *   第三行：token 用量（↑输入 ↓输出） · 累计花费（货币符号可配） · 上下文用量 ctx used/window (pct) · 缓存命中率 cache% · 生成速度 tok/s
+ *   第三行：token 用量（↑输入 ↓输出） · 累计花费（货币符号可配，含 parentSession 链） · 上下文用量 ctx used/window (pct) · 缓存命中率 cache% · 生成速度 tok/s
+ *
+ *   cost：当前会话（getEntries()，含压缩前历史，压缩不清零）+ parentSession 链历史会话（history.ts）。
+ *        历史会话部分以 "(+¥x)" 标出；plan-mode fresh / handoff / fork 后总花费仍连续。
+ *        可用 /footer chain on|off 关闭跨会话累加。
  *
  *   ctx：来自 ctx.getContextUsage()；显示绝对量与百分比，>90% 红（error）、>70% 黄（warning），
  *        压缩后下次响应前未知时显示 "ctx ?/200k"
@@ -26,6 +30,7 @@
  *   /footer                切换自定义底栏 <-> 默认底栏
  *   /footer on|off         显式开启 / 关闭
  *   /footer list           列出支持的货币
+ *   /footer chain on|off  是否跨会话（parentSession 链）累计花费
  *   /footer <code|symbol>  设置费用单位（如 cny、¥、eur）
  */
 
@@ -46,6 +51,12 @@ import {
 	type CurrencyDef,
 } from "./currency";
 import { GitBranchWatcher, type GitState, type GitStatus } from "./git";
+import {
+	accumulateEntries,
+	createTotals,
+	readAncestorUsage,
+	type UsageTotals,
+} from "./history";
 
 // ---- 模块级状态（跨 session_start 保持） ----
 let enabled = true;
@@ -53,8 +64,12 @@ let enabled = true;
 let currentModel: { id: string; reasoning: boolean } | undefined;
 /** 当前思考等级（兼容运行时 "off" 字符串与 undefined 两种关闭形态） */
 let currentThinkingLevel: string | undefined;
-/** 费用展示货币（启动时从配置文件读取） */
-let currency: CurrencyDef = resolveCurrency(loadConfig().currency ?? "") ?? DEFAULT_CURRENCY;
+/** 本地配置（启动时读一次，/footer 命令修改后写回） */
+const initialConfig = loadConfig();
+/** 费用展示货币 */
+let currency: CurrencyDef = resolveCurrency(initialConfig.currency ?? "") ?? DEFAULT_CURRENCY;
+/** 是否把 parentSession 链（plan-mode fresh / handoff / fork）的历史花费累加进总花费；默认开 */
+let chainCost: boolean = initialConfig.chainCost ?? true;
 /** 当前 footer 实例的重绘函数；gen 守卫防止旧实例 dispose 误清新实例 */
 let requestRender: (() => void) | null = null;
 let footerGen = 0;
@@ -83,54 +98,14 @@ function fmtSpeed(tps: number): string {
 	return `${tps.toFixed(2)} tok/s`;
 }
 
-// ---- 从当前会话分支统计 token / 花费 / 缓存（口径与 pi 默认 footer 一致） ----
+// ---- 统计当前会话的 token / 花费 / 缓存（累加实现见 history.ts，口径与 pi 默认 footer 一致） ----
+// 注意：这里用 sessionManager.getEntries()（整个会话文件）而不是 getBranch()（当前叶子路径）。
+// pi 会话文件是只追加的，压缩只是追加一条 compaction 条目并把摘要用于模型上下文，
+// 压缩前的历史条目仍在文件里；因此累计花费在压缩后依然连续，不会清零。
+// 换会话文件（plan-mode fresh / handoff / fork）才会重置，由 history.ts 的 parentSession 链补偿。
 
-interface UsageStats {
-	input: number;
-	output: number;
-	cost: number;
-	/** 累计缓存 token（cacheRead + cacheWrite），0 表示 provider 从未上报缓存数据 */
-	cacheTokens: number;
-	/** 最近一次请求的缓存命中率（%），无可计算数据时为 null */
-	latestCacheHitRate: number | null;
-	/** 最近一次请求从缓存读取的 token 数 */
-	latestCacheRead: number | null;
-}
-
-function computeUsage(ctx: ExtensionContext): UsageStats {
-	let input = 0;
-	let output = 0;
-	let cost = 0;
-	let cacheTokens = 0;
-	let latestCacheHitRate: number | null = null;
-	let latestCacheRead: number | null = null;
-	for (const e of ctx.sessionManager.getBranch()) {
-		if (e.type === "message") {
-			if (e.message.role !== "assistant" && e.message.role !== "toolResult") continue;
-			// assistant / toolResult 两种角色都携带 usage（默认 footer 同样统计二者）
-			const m = e.message as AssistantMessage;
-			const u = m.usage;
-			if (!u) continue;
-			input += u.input ?? 0;
-			output += u.output ?? 0;
-			cost += u.cost?.total ?? 0;
-			cacheTokens += (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
-			if (e.message.role === "assistant") {
-				latestCacheRead = u.cacheRead ?? 0;
-				const prompt = (u.input ?? 0) + (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
-				if (prompt > 0) {
-					latestCacheHitRate = ((u.cacheRead ?? 0) / prompt) * 100;
-				}
-			}
-		} else if ((e.type === "compaction" || e.type === "branch_summary") && e.usage) {
-			const u = e.usage;
-			input += u.input ?? 0;
-			output += u.output ?? 0;
-			cost += u.cost?.total ?? 0;
-			cacheTokens += (u.cacheRead ?? 0) + (u.cacheWrite ?? 0);
-		}
-	}
-	return { input, output, cost, cacheTokens, latestCacheHitRate, latestCacheRead };
+function computeUsage(ctx: ExtensionContext): UsageTotals {
+	return accumulateEntries(createTotals(), ctx.sessionManager.getEntries());
 }
 
 // ---- 渲染分支：自身探测 → pi 内置 → 无（返回 null 时不显示括号） ----
@@ -225,6 +200,13 @@ export default function (pi: ExtensionAPI) {
 				invalidate() {},
 				render(width: number): string[] {
 					const stats = computeUsage(ctx);
+					// 历史会话（parentSession 链）花费：plan-mode fresh / handoff / fork 后总花费仍连续
+					const history = chainCost
+						? readAncestorUsage(
+								ctx.sessionManager.getHeader()?.parentSession,
+								ctx.sessionManager.getSessionFile(),
+							)
+						: createTotals();
 					const lines: string[] = [];
 
 					// 第一行：模型名 • 思考等级（左） + 其他扩展状态（右，若存在）
@@ -278,9 +260,14 @@ export default function (pi: ExtensionAPI) {
 					}
 
 					// 第三行：token · 花费 · 上下文占用 · 缓存低命中警示
+					// 花费展示 = 当前会话 + 历史会话（后者以 (+¥x) 标出，便于区分新会话首次渲染为何不为 0）
+					const costParts = [theme.fg("muted", formatCost(stats.cost + history.cost, currency))];
+					if (history.cost > 0) {
+						costParts.push(theme.fg("dim", `(+${formatCost(history.cost, currency)})`));
+					}
 					const parts = [
 						theme.fg("muted", `↑${fmtTokens(stats.input)} ↓${fmtTokens(stats.output)}`),
-						theme.fg("muted", formatCost(stats.cost, currency)),
+						costParts.join(" "),
 					];
 
 					// ctx：上下文用量（绝对量 + 百分比，口径同默认 footer：>90% error、>70% warning）
@@ -385,7 +372,7 @@ export default function (pi: ExtensionAPI) {
 	pi.on("session_compact", async () => requestRender?.());
 
 	pi.registerCommand("footer", {
-		description: "Toggle custom footer; set cost currency (e.g. /footer cny)",
+		description: "Toggle custom footer; set cost currency (e.g. /footer cny) or chain accumulation",
 		handler: async (args, ctx) => {
 			const raw = (args ?? "").trim();
 			const arg = raw.toLowerCase();
@@ -399,19 +386,36 @@ export default function (pi: ExtensionAPI) {
 			} else if (headLower === "list" || headLower === "units") {
 				ctx.ui.notify(`Supported currencies: ${listCurrencies()}`, "info");
 				return;
+			} else if (headLower === "chain") {
+				// /footer chain on|off：是否把 parentSession 链的历史花费累加进总花费
+				const value = (rest[0] ?? "").toLowerCase();
+				if (value !== "on" && value !== "off") {
+					ctx.ui.notify("Usage: /footer chain on|off", "warning");
+					return;
+				}
+				chainCost = value === "on";
+				saveConfig({ ...loadConfig(), chainCost });
+				requestRender?.();
+				ctx.ui.notify(
+					chainCost
+						? "Cost now accumulates across the session chain (parentSession)"
+						: "Cost limited to the current session",
+					"info",
+				);
+				return;
 			} else {
 				// /footer currency cny 或 /footer cny /footer ¥
 				const input = headLower === "currency" ? rest.join(" ") : raw;
 				const next = input ? resolveCurrency(input) : null;
 				if (!next) {
 					ctx.ui.notify(
-						`Unknown arg "${raw}". Usage: /footer [on|off|list|<code|symbol>]`,
+						`Unknown arg "${raw}". Usage: /footer [on|off|list|chain on|off|<code|symbol>]`,
 						"warning",
 						);
 					return;
 				}
 				currency = next;
-				saveConfig({ currency: next.code });
+				saveConfig({ ...loadConfig(), currency: next.code });
 				requestRender?.();
 				ctx.ui.notify(`Cost unit: ${next.symbol} (${next.name})`, "info");
 				return;

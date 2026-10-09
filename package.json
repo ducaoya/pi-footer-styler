@@ -22,6 +22,7 @@
 		"index.ts",
 		"config.ts",
 		"currency.ts",
+		"history.ts",
 		"git.ts",
 		"README.md",
 		"LICENSE"

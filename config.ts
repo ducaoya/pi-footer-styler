@@ -14,6 +14,8 @@ import { isAbsolute, join } from "node:path";
 export interface FooterConfig {
 	/** 费用货币代码，如 "cny" */
 	currency?: string;
+	/** 是否把 parentSession 链（plan-mode fresh / handoff / fork）的历史花费累加进总花费；默认 true */
+	chainCost?: boolean;
 }
 
 const ENV_AGENT_DIR = "PI_CODING_AGENT_DIR";

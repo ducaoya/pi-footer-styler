@@ -10,16 +10,23 @@
 zhipu/glm-5.3-flash • high                          [其他扩展状态]
 ~/projects/pi-footer-styler (master ↑1 ↓2 *3)
 ↑1.2k ↓3.4k │ ¥0.123 │ ctx 85k/200k (42%) │ cache 84k (99.8%) │ 87 tok/s
+↑137k ↓123k │ ¥26.80 (+¥24.85) │ ctx ?/1.0M │ cache 239k (99.9%)
 ```
+
+第二个示例是「新会话继承了历史会话花费」的形态：`¥26.80` 是总花费，`(+¥24.85)` 是 parentSession 链上历史会话的部分。
 
 - **第一行**：模型名（dim 色）；模型支持推理时追加 `• 思考等级`（关闭时显示 `thinking off`）；有其他扩展状态时右对齐展示
 - **第二行**：当前路径（home 目录缩写为 `~`，超宽时保留尾部左侧截断）；在仓库内时括号内显示 git 分支（accent 色，detached 显示短 hash），不在仓库内则无括号；分支后可跟状态计数（dim 色）：`↑1` 领先 upstream、`↓2` 落后 upstream、`*3` 未提交变更数（含未跟踪），**为 0 的段自动隐藏**，全为 0 时仅显示分支名
 - **第三行**：token 用量（↑ 输入 ↓ 输出）· 累计花费（货币符号可配）· 上下文用量 · 缓存命中率 · 生成速度
+  - **cost**：默认显示**跨会话累计**总花费，如 `¥26.80 (+¥24.85)`——`¥26.80` = 当前会话 + 历史会话，括号里是历史会话（parentSession 链）的部分。
+    当前会话部分按**整份会话文件**统计（`getEntries()`，与 pi 默认 footer 同口径）：压缩只追加 compaction 条目，**压缩前的历史条目仍在文件里，因此压缩不会清零**；
+    而 plan-mode 的「在新会话里实现」、`/handoff`、`/fork`、`/clone` 会**新建会话文件**，费用天然从 0 起算，此时由 parentSession 链补上历史花费。
+    关闭该行为：`/footer chain off`（只统计当前会话）
   - **ctx**：`已用 token/窗口上限 (百分比)`，如 `ctx 85k/200k (42%)`；**>90% 红**、**>70% 黄**；压缩后下次响应前未知时显示 `ctx ?/200k`
   - **cache**：`命中量 (命中率)`，如 `cache 84k (99.8%)`——最近一次请求从缓存读取的 token 数与命中率（`cacheRead / (input+cacheRead+cacheWrite)`，一位小数），provider 上报过缓存数据即常显；**<50% 黄色警示**（如缓存失效、前缀变动），正常为 muted 色。注：zhipu 等自动缓存命中率通常在 95~99.9%，偶发 0% 多为缓存前缀失效（如系统提示词变化）后的全价请求
   - **生成速度**：`87 tok/s`——**最近一次助手响应的输出速率（tokens per second）估算**，只展示「量 + 单位」（不加 `speed` 前缀，符合最主流状态栏表述）。`message_start` 记录请求起点，首个流式增量（text / thinking / toolcall delta）到达时作为生成起点以**剔除首 token 延迟（TTFT）**，`message_end` 用真实 `usage.output` 结算；含思考 token（`output` 本身已包含 reasoning）。切换模型后清空（旧数值不再代表当前模型）
   - token 格式化与 pi 默认 footer 同口径（<10k 一位小数，如 `1.2k`；更大取整，如 `85k`）；输出速率 >=100 取整、>=10 一位小数、其余两位小数
-  - 统计口径与 pi 默认 footer 一致：assistant 与 toolResult 的 usage 都计入，压缩/分支摘要条目的 usage 也计入
+  - 统计口径与 pi 默认 footer 一致：`assistant` 与 `toolResult` 的 usage 都计入，`usage` 条目（缓存预热等）与压缩/分支摘要条目的 usage 也计入；token 与 cache 只统计当前会话，仅**花费**跨会话累加
 - 模型切换、思考等级切换、git 分支切换、token 累加均实时刷新
 
 ## git 分支检测（git.ts）
@@ -39,6 +46,21 @@ zhipu/glm-5.3-flash • high                          [其他扩展状态]
 
 **ahead / behind / 未提交计数**：后台异步调用 `git status --porcelain=v1 -b -z`（单次拿全三项），刷新时机：启动、分支切换、每轮 agent 结束（turn_end / agent_end）、低频兑底轮询（10s，捕捉终端里的手动提交）；带去重合并与 5s 超时，git 未安装 / 非仓库时静默降级为仅显示分支名
 
+## 跨会话花费累计（history.ts）
+
+pi 有多个入口会**新建会话文件**并把旧会话记进新会话 header 的 `parentSession`：
+
+- plan-mode 的 fresh implementation（「在新会话里实现计划」）、`/handoff`
+- `/fork`、`/clone`，以及任何调用 `ctx.newSession({ parentSession })` 的场景
+
+这些场景下当前会话的费用是 0（新会话），看起来像「压缩把费用清零」。本扩展沿 `parentSession` 链向上读取历史会话的 usage，把总花费显示为
+`当前会话 + 历史会话`，历史部分用 `(+¥x)` 标出。
+
+- 只累加**花费**；token（↑/↓）、cache、ctx 仍只反映当前会话
+- 解析结果按「文件路径 + mtime + size」缓存：5.9MB 历史会话首次解析约 40ms，之后每帧仅 stat（<1ms）
+- 文件缺失 / 损坏 / 成环（含指回当前会话）时安全降级，只显示已读到的部分
+- 深度上限 16 层，足够覆盖常见的 fresh / handoff 链
+
 ## 命令
 
 | 命令 | 说明 |
@@ -46,6 +68,7 @@ zhipu/glm-5.3-flash • high                          [其他扩展状态]
 | `/footer` | 自定义底栏 ↔ 默认底栏 切换 |
 | `/footer on` / `/footer off` | 显式开启 / 关闭 |
 | `/footer list` | 列出支持的货币 |
+| `/footer chain on` / `/footer chain off` | 开启 / 关闭跨会话（parentSession 链）累计花费（持久化，默认开） |
 | `/footer <code\|symbol>` | 设置费用单位，如 `/footer cny`、`/footer ¥`、`/footer eur`（持久化） |
 
 ## 费用货币单位

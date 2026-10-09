@@ -14,6 +14,7 @@ token 用量、累计花费、上下文占用、缓存命中率、生成速度�
 | `index.ts` | 扩展入口：事件订阅、footer 渲染、`/footer` 命令 |
 | `config.ts` | 本地配置读写（`~/.pi/agent/pi-footer-styler.json`），自带 `getAgentDir` 以免 import pi barrel |
 | `currency.ts` | 费用货币注册表（代码/符号 → 展示）|
+| `history.ts` | parentSession 链历史会话的 usage 读取与缓存（跨会话花费累计）|
 | `git.ts` | 独立后台 git 分支/状态探测器（与 pi 内置互为回退）|
 | `.github/workflows/publish.yml` | npm 自动发布（Trusted Publishing / OIDC）|
 
